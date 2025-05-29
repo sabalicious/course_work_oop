@@ -8,7 +8,9 @@
 #include <QSqlQuery>
 #include <QDebug>
 #include <QFileDialog>
+#include <QTimer>
 #include "Logger.h"
+#include "LastDbPathManager.h"
 
 // Конструктор главного окна приложения.
 MainWindow::MainWindow(QWidget *parent)
@@ -57,9 +59,15 @@ QTableCornerButton::section {
         qDebug() << "themeButton NOT found!";
     }
 
-    // Открываем тестовую базу данных (или создаём новую)
-    if (!dbManager.openDatabase("test_database.db")) {
-        QMessageBox::critical(this, "Ошибка", "Не удалось подключиться к базе данных");
+    // Открываем последнюю базу данных (или тестовую по умолчанию)
+    QString lastDbPath = LastDbPathManager::loadLastDbPath();
+    qDebug() << "Загруженный путь к базе:" << lastDbPath;
+    if (lastDbPath.isEmpty()) lastDbPath = "test_database.db";
+    qDebug() << "Открываем базу:" << lastDbPath;
+    bool opened = dbManager.openDatabase(lastDbPath);
+    qDebug() << "Результат открытия базы:" << opened;
+    if (!opened) {
+        QMessageBox::critical(this, "Ошибка", "Не удалось подключиться к базе данных: " + lastDbPath);
         return;
     }
 
@@ -76,7 +84,26 @@ QTableCornerButton::section {
     // Подключаем сигналы от QueryExecutor для обработки результата выполнения запроса
     connect(executor, &QueryExecutor::queryExecuted, this, &MainWindow::onQueryExecuted);
     connect(executor, &QueryExecutor::errorOccurred, this, &MainWindow::onQueryError);
-    
+
+    // --- Автоматически показываем первую таблицу, если есть (отложенно) ---
+    QTimer::singleShot(0, this, [this]() {
+        QSqlQuery query(dbManager.getDatabase());
+        if (query.exec("SELECT name FROM sqlite_master WHERE type='table' LIMIT 1;")) {
+            if (query.next()) {
+                QString tableName = query.value(0).toString();
+                qDebug() << "Первая таблица:" << tableName;
+                bool execOk = executor->executeQuery("SELECT * FROM " + tableName);
+                qDebug() << "Результат exec SELECT:" << execOk;
+                Logger::instance().log("Открыта таблица: " + tableName);
+            } else {
+                qDebug() << "В базе нет таблиц!";
+            }
+        } else {
+            qDebug() << "Ошибка запроса к sqlite_master:" << query.lastError().text();
+        }
+    });
+    // --- конец автозагрузки таблицы ---
+
     qDebug() << "MainWindow initialization completed";
 }
 
@@ -192,10 +219,11 @@ void MainWindow::onInitTestDatabase() {
 // Слот вызывается после выполнения SQL-запроса.
 // Обновляет таблицу результатом последнего запроса.
 void MainWindow::onQueryExecuted(bool success) {
+    qDebug() << "onQueryExecuted, success:" << success;
     if (success) {
-        // Обновляем модель данными из последнего запроса
         QSqlQuery result = executor->getCurrentCommand()->getResult();
         model->setQuery(result);
+        qDebug() << "Модель обновлена";
     }
 }
 
@@ -220,6 +248,9 @@ void MainWindow::onOpenDatabase() {
     }
 
     Logger::instance().log("Открыта база данных: " + fileName);
+    // Сохраняем путь к последней открытой базе
+    qDebug() << "Сохраняем путь к базе:" << fileName;
+    LastDbPathManager::saveLastDbPath(fileName);
     // Попробуем показать первую таблицу, если есть
     QSqlQuery query(dbManager.getDatabase());
     if (query.exec("SELECT name FROM sqlite_master WHERE type='table' LIMIT 1;")) {
